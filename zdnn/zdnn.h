@@ -653,6 +653,50 @@ zdnn_status zdnn_get_max_limit(zdnn_data_types transformed_type,
 zdnn_status zdnn_get_min_limit(zdnn_data_types transformed_type,
                                zdnn_data_types pre_transformed_type,
                                void *limit);
+
+// -----------------------------------------------------------------------------
+// zdnn-sim Extension Functions (for llama.cpp compatibility)
+// -----------------------------------------------------------------------------
+
+// RMS Normalization - key operation for LLaMA-style models
+zdnn_status zdnn_rmsnorm(const zdnn_ztensor *input,
+                         const zdnn_ztensor *weight,
+                         float epsilon,
+                         zdnn_ztensor *output);
+
+// Extract rows using indices - for embedding lookups
+zdnn_status zdnn_get_rows(const float *src,
+                          int64_t src_ne0,
+                          int64_t src_ne1,
+                          const int32_t *indices,
+                          int64_t num_indices,
+                          float *output);
+
+// Batched row extraction for 4D tensors
+zdnn_status zdnn_get_rows_batched(const float *src,
+                                   int64_t src_ne0,
+                                   int64_t src_ne1,
+                                   int64_t src_ne2,
+                                   int64_t src_ne3,
+                                   const int32_t *indices,
+                                   int64_t idx_ne0,
+                                   int64_t idx_ne1,
+                                   int64_t idx_ne2,
+                                   float *output);
+
+// Rotary Position Embedding - for transformer attention
+zdnn_status zdnn_rope(const float *input,
+                      const int32_t *positions,
+                      int64_t ne0,
+                      int64_t ne1,
+                      int64_t ne2,
+                      int64_t ne3,
+                      int n_dims,
+                      int mode,
+                      float freq_base,
+                      float freq_scale,
+                      float *output);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
