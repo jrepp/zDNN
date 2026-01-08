@@ -149,7 +149,6 @@ ZDNN_1.0 {
     zdnn_get_status_message;
     zdnn_get_max_limit;
     zdnn_get_min_limit;
-    # zdnn-sim extension functions (llama.cpp compatibility)
     zdnn_rmsnorm;
     zdnn_get_rows;
     zdnn_get_rows_batched;
