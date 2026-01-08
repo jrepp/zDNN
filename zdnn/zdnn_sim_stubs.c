@@ -271,7 +271,8 @@ zdnn_status zdnn_rmsnorm(const zdnn_ztensor *input,
         }
     }
 
-    /* Transform result back to stickified format */
+    /* Reset output tensor state and transform result back to stickified format */
+    zdnn_reset_ztensor(output);
     status = zdnn_transform_ztensor(output, out_raw);
 
     /* Cleanup */
