@@ -11,12 +11,40 @@
  *   - zdnn_get_rows: Embedding table lookup (gather)
  *   - zdnn_get_rows_batched: Batched embedding lookup
  *   - zdnn_rope: Rotary Position Embedding
+ *
+ * API Design:
+ *   All functions use zdnn_ztensor* for type safety and consistency with
+ *   the IBM zDNN API. The ztensor provides:
+ *   - Type information via pre_transformed_desc->type
+ *   - Shape information via pre_transformed_desc->dim[1-4]
+ *   - Data buffer via buffer pointer
+ *   - State tracking via is_transformed flag
+ *
+ *   For operations that don't use AIU transformation (get_rows, rope),
+ *   tensors should have is_transformed=false and buffer points to raw data.
  */
 
 #include "zdnn.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+
+/* ============================================================================
+ * Helper: Get raw float pointer from ztensor
+ * For untransformed tensors, buffer contains raw data directly.
+ * ============================================================================
+ */
+static inline const float *get_float_data(const zdnn_ztensor *zt) {
+    return (const float *)zt->buffer;
+}
+
+static inline float *get_float_data_mut(zdnn_ztensor *zt) {
+    return (float *)zt->buffer;
+}
+
+static inline const int32_t *get_int32_data(const zdnn_ztensor *zt) {
+    return (const int32_t *)zt->buffer;
+}
 
 /* ============================================================================
  * zdnn_get_rows - Extract rows using indices (embedding lookup)
@@ -26,43 +54,60 @@
  * copies the selected rows to the output.
  *
  * Parameters:
- *   src         - Source embedding matrix [src_ne1 x src_ne0] (row-major)
- *   src_ne0     - Embedding dimension (row width)
- *   src_ne1     - Vocabulary size (number of rows)
- *   indices     - Array of row indices to gather
- *   num_indices - Number of indices (sequence length)
- *   output      - Output buffer [num_indices x src_ne0]
+ *   input   - Source embedding matrix ztensor [vocab_size x embed_dim]
+ *   indices - Index tensor [num_indices] with type INT32
+ *   output  - Output tensor [num_indices x embed_dim]
+ *
+ * Note: Tensors should have is_transformed=false (raw data mode)
  *
  * Returns: ZDNN_OK on success
  * ============================================================================
  */
-zdnn_status zdnn_get_rows(const float *src,
-                          int64_t src_ne0,
-                          int64_t src_ne1,
-                          const int32_t *indices,
-                          int64_t num_indices,
-                          float *output) {
+zdnn_status zdnn_get_rows(const zdnn_ztensor *input,
+                          const zdnn_ztensor *indices,
+                          zdnn_ztensor *output) {
     /* Validate inputs */
-    if (!src || !indices || !output) {
+    if (!input || !indices || !output) {
         return ZDNN_INVALID_BUFFER;
     }
-    if (src_ne0 <= 0 || src_ne1 <= 0 || num_indices <= 0) {
+    if (!input->buffer || !indices->buffer || !output->buffer) {
+        return ZDNN_INVALID_BUFFER;
+    }
+    if (!input->pre_transformed_desc || !indices->pre_transformed_desc ||
+        !output->pre_transformed_desc) {
+        return ZDNN_INVALID_BUFFER;
+    }
+
+    /* Get dimensions from tensor descriptors */
+    const zdnn_tensor_desc *src_desc = input->pre_transformed_desc;
+    const zdnn_tensor_desc *idx_desc = indices->pre_transformed_desc;
+
+    const int64_t embed_dim = src_desc->dim1;   /* embedding dimension */
+    const int64_t vocab_size = src_desc->dim2;  /* vocabulary size (rows) */
+    const int64_t num_indices = idx_desc->dim1; /* number of indices */
+
+    if (embed_dim <= 0 || vocab_size <= 0 || num_indices <= 0) {
         return ZDNN_INVALID_SHAPE;
     }
 
-    const size_t row_bytes = (size_t)src_ne0 * sizeof(float);
+    /* Get raw data pointers */
+    const float *src = get_float_data(input);
+    const int32_t *idx = get_int32_data(indices);
+    float *dst = get_float_data_mut(output);
+
+    const size_t row_bytes = (size_t)embed_dim * sizeof(float);
 
     /* Gather rows - optimized for sequential output access */
     for (int64_t i = 0; i < num_indices; i++) {
-        int32_t row_idx = indices[i];
+        int32_t row_idx = idx[i];
 
         /* Bounds check */
-        if (row_idx < 0 || row_idx >= src_ne1) {
+        if (row_idx < 0 || row_idx >= vocab_size) {
             return ZDNN_INVALID_STATE;
         }
 
-        const float *src_row = src + (int64_t)row_idx * src_ne0;
-        float *dst_row = output + i * src_ne0;
+        const float *src_row = src + (int64_t)row_idx * embed_dim;
+        float *dst_row = dst + i * embed_dim;
 
         memcpy(dst_row, src_row, row_bytes);
     }
@@ -71,53 +116,69 @@ zdnn_status zdnn_get_rows(const float *src,
 }
 
 /* ============================================================================
- * zdnn_get_rows_batched - Batched row extraction for 4D tensors
+ * zdnn_get_rows_batched - Batched row extraction for higher-dim tensors
  *
  * Extends zdnn_get_rows to handle batched operations with 4D tensors.
  * Used when processing multiple sequences with different embeddings.
  *
  * Parameters:
- *   src         - Source tensor [src_ne3 x src_ne2 x src_ne1 x src_ne0]
- *   src_ne0-3   - Source tensor dimensions
- *   indices     - Index tensor [idx_ne2 x idx_ne1 x idx_ne0]
- *   idx_ne0-2   - Index tensor dimensions
- *   output      - Output tensor
+ *   input   - Source tensor [dim4 x dim3 x vocab_size x embed_dim]
+ *   indices - Index tensor [idx_dim3 x idx_dim2 x num_indices]
+ *   output  - Output tensor
+ *
+ * Note: Tensors should have is_transformed=false (raw data mode)
  *
  * Returns: ZDNN_OK on success
  * ============================================================================
  */
-zdnn_status zdnn_get_rows_batched(const float *src,
-                                   int64_t src_ne0,
-                                   int64_t src_ne1,
-                                   int64_t src_ne2,
-                                   int64_t src_ne3,
-                                   const int32_t *indices,
-                                   int64_t idx_ne0,
-                                   int64_t idx_ne1,
-                                   int64_t idx_ne2,
-                                   float *output) {
+zdnn_status zdnn_get_rows_batched(const zdnn_ztensor *input,
+                                   const zdnn_ztensor *indices,
+                                   zdnn_ztensor *output) {
     /* Validate inputs */
-    if (!src || !indices || !output) {
+    if (!input || !indices || !output) {
         return ZDNN_INVALID_BUFFER;
     }
-    if (src_ne0 <= 0 || src_ne1 <= 0 || src_ne2 <= 0 || src_ne3 <= 0) {
+    if (!input->buffer || !indices->buffer || !output->buffer) {
+        return ZDNN_INVALID_BUFFER;
+    }
+    if (!input->pre_transformed_desc || !indices->pre_transformed_desc ||
+        !output->pre_transformed_desc) {
+        return ZDNN_INVALID_BUFFER;
+    }
+
+    /* Get dimensions from tensor descriptors */
+    const zdnn_tensor_desc *src_desc = input->pre_transformed_desc;
+    const zdnn_tensor_desc *idx_desc = indices->pre_transformed_desc;
+
+    const int64_t src_ne0 = src_desc->dim1;  /* embed_dim */
+    const int64_t src_ne1 = src_desc->dim2;  /* vocab_size */
+    const int64_t src_ne2 = src_desc->dim3 > 0 ? src_desc->dim3 : 1;
+    const int64_t src_ne3 = src_desc->dim4 > 0 ? src_desc->dim4 : 1;
+
+    const int64_t idx_ne0 = idx_desc->dim1;  /* indices per batch */
+    const int64_t idx_ne1 = idx_desc->dim2 > 0 ? idx_desc->dim2 : 1;
+    const int64_t idx_ne2 = idx_desc->dim3 > 0 ? idx_desc->dim3 : 1;
+
+    if (src_ne0 <= 0 || src_ne1 <= 0 || idx_ne0 <= 0) {
         return ZDNN_INVALID_SHAPE;
     }
-    if (idx_ne0 <= 0 || idx_ne1 <= 0 || idx_ne2 <= 0) {
-        return ZDNN_INVALID_SHAPE;
-    }
+
+    /* Get raw data pointers */
+    const float *src = get_float_data(input);
+    const int32_t *idx = get_int32_data(indices);
+    float *dst = get_float_data_mut(output);
 
     const size_t row_bytes = (size_t)src_ne0 * sizeof(float);
-    const int64_t src_stride1 = src_ne0;                          /* stride between rows */
-    const int64_t src_stride2 = src_ne0 * src_ne1;                /* stride between 2D slices */
-    const int64_t src_stride3 = src_ne0 * src_ne1 * src_ne2;      /* stride between 3D blocks */
+    const int64_t src_stride1 = src_ne0;                     /* stride between rows */
+    const int64_t src_stride2 = src_ne0 * src_ne1;           /* stride between 2D slices */
+    const int64_t src_stride3 = src_ne0 * src_ne1 * src_ne2; /* stride between 3D blocks */
 
-    const int64_t idx_stride1 = idx_ne0;                          /* stride between index rows */
-    const int64_t idx_stride2 = idx_ne0 * idx_ne1;                /* stride between index slices */
+    const int64_t idx_stride1 = idx_ne0;                     /* stride between index rows */
+    const int64_t idx_stride2 = idx_ne0 * idx_ne1;           /* stride between index slices */
 
-    const int64_t out_stride1 = src_ne0;                          /* output row stride */
-    const int64_t out_stride2 = src_ne0 * idx_ne0;                /* output slice stride */
-    const int64_t out_stride3 = src_ne0 * idx_ne0 * idx_ne1;      /* output block stride */
+    const int64_t out_stride1 = src_ne0;                     /* output row stride */
+    const int64_t out_stride2 = src_ne0 * idx_ne0;           /* output slice stride */
+    const int64_t out_stride3 = src_ne0 * idx_ne0 * idx_ne1; /* output block stride */
 
     /* Iterate over batch dimensions */
     for (int64_t i3 = 0; i3 < idx_ne2; i3++) {
@@ -131,8 +192,8 @@ zdnn_status zdnn_get_rows_batched(const float *src,
             if (s2 >= src_ne2) s2 = src_ne2 - 1;
 
             const float *src_slice = src + s3 * src_stride3 + s2 * src_stride2;
-            const int32_t *idx_slice = indices + i3 * idx_stride2 + i2 * idx_stride1;
-            float *out_slice = output + i3 * out_stride3 + i2 * out_stride2;
+            const int32_t *idx_slice = idx + i3 * idx_stride2 + i2 * idx_stride1;
+            float *out_slice = dst + i3 * out_stride3 + i2 * out_stride2;
 
             /* Gather rows for this slice */
             for (int64_t i1 = 0; i1 < idx_ne0; i1++) {
@@ -296,33 +357,45 @@ zdnn_status zdnn_rmsnorm(const zdnn_ztensor *input,
  *     out[i+1] = in[i] * sin(theta) + in[i+1] * cos(theta)
  *
  * Parameters:
- *   input      - Input tensor data [ne3 x ne2 x ne1 x ne0]
- *   positions  - Position indices for each token
- *   ne0-ne3    - Tensor dimensions
+ *   input      - Input tensor [dim4 x dim3 x dim2 x dim1]
+ *   positions  - Position indices tensor [seq_len], type INT32
  *   n_dims     - Number of dimensions to apply rotation to
  *   mode       - RoPE variant (0=standard, 2=GPT-NeoX)
  *   freq_base  - Base frequency, typically 10000.0
  *   freq_scale - Scaling factor for extended context (typically 1.0)
- *   output     - Output tensor data
+ *   output     - Output tensor (same shape as input)
+ *
+ * Note: Tensors should have is_transformed=false (raw data mode)
  *
  * Returns: ZDNN_OK on success
  * ============================================================================
  */
-zdnn_status zdnn_rope(const float *input,
-                      const int32_t *positions,
-                      int64_t ne0,
-                      int64_t ne1,
-                      int64_t ne2,
-                      int64_t ne3,
+zdnn_status zdnn_rope(const zdnn_ztensor *input,
+                      const zdnn_ztensor *positions,
                       int n_dims,
                       int mode,
                       float freq_base,
                       float freq_scale,
-                      float *output) {
+                      zdnn_ztensor *output) {
     /* Validate inputs */
     if (!input || !positions || !output) {
         return ZDNN_INVALID_BUFFER;
     }
+    if (!input->buffer || !positions->buffer || !output->buffer) {
+        return ZDNN_INVALID_BUFFER;
+    }
+    if (!input->pre_transformed_desc || !positions->pre_transformed_desc ||
+        !output->pre_transformed_desc) {
+        return ZDNN_INVALID_BUFFER;
+    }
+
+    /* Get dimensions from tensor descriptors */
+    const zdnn_tensor_desc *desc = input->pre_transformed_desc;
+    const int64_t ne0 = desc->dim1;  /* embed_dim */
+    const int64_t ne1 = desc->dim2 > 0 ? desc->dim2 : 1;  /* n_head */
+    const int64_t ne2 = desc->dim3 > 0 ? desc->dim3 : 1;  /* n_seq */
+    const int64_t ne3 = desc->dim4 > 0 ? desc->dim4 : 1;  /* batch */
+
     if (ne0 <= 0 || ne1 <= 0 || ne2 <= 0 || ne3 <= 0) {
         return ZDNN_INVALID_SHAPE;
     }
@@ -335,6 +408,11 @@ zdnn_status zdnn_rope(const float *input,
         return ZDNN_FUNC_RC_F000;
     }
 
+    /* Get raw data pointers */
+    const float *src = get_float_data(input);
+    const int32_t *pos = get_int32_data(positions);
+    float *dst = get_float_data_mut(output);
+
     const float theta_scale = freq_scale;
     const int half_dims = n_dims / 2;
 
@@ -342,52 +420,52 @@ zdnn_status zdnn_rope(const float *input,
     for (int64_t i3 = 0; i3 < ne3; i3++) {
         for (int64_t i2 = 0; i2 < ne2; i2++) {
             /* Get position for this token */
-            int32_t pos = positions[i2];
+            int32_t p = pos[i2];
 
             for (int64_t i1 = 0; i1 < ne1; i1++) {
-                const float *src = input + i3 * ne2 * ne1 * ne0 + i2 * ne1 * ne0 + i1 * ne0;
-                float *dst = output + i3 * ne2 * ne1 * ne0 + i2 * ne1 * ne0 + i1 * ne0;
+                const float *src_ptr = src + i3 * ne2 * ne1 * ne0 + i2 * ne1 * ne0 + i1 * ne0;
+                float *dst_ptr = dst + i3 * ne2 * ne1 * ne0 + i2 * ne1 * ne0 + i1 * ne0;
 
                 if (mode == 0) {
                     /* Standard RoPE: pairs are (0,1), (2,3), (4,5), ... */
                     for (int i = 0; i < half_dims; i++) {
                         /* Compute rotation angle */
                         float freq = 1.0f / powf(freq_base, (float)(2 * i) / (float)n_dims);
-                        float theta = (float)pos * freq * theta_scale;
+                        float theta = (float)p * freq * theta_scale;
                         float cos_theta = cosf(theta);
                         float sin_theta = sinf(theta);
 
                         int idx0 = 2 * i;
                         int idx1 = 2 * i + 1;
 
-                        float x0 = src[idx0];
-                        float x1 = src[idx1];
+                        float x0 = src_ptr[idx0];
+                        float x1 = src_ptr[idx1];
 
-                        dst[idx0] = x0 * cos_theta - x1 * sin_theta;
-                        dst[idx1] = x0 * sin_theta + x1 * cos_theta;
+                        dst_ptr[idx0] = x0 * cos_theta - x1 * sin_theta;
+                        dst_ptr[idx1] = x0 * sin_theta + x1 * cos_theta;
                     }
                 } else if (mode == 2) {
                     /* GPT-NeoX: pairs are (0, n/2), (1, n/2+1), ... */
                     for (int i = 0; i < half_dims; i++) {
                         float freq = 1.0f / powf(freq_base, (float)(2 * i) / (float)n_dims);
-                        float theta = (float)pos * freq * theta_scale;
+                        float theta = (float)p * freq * theta_scale;
                         float cos_theta = cosf(theta);
                         float sin_theta = sinf(theta);
 
                         int idx0 = i;
                         int idx1 = i + half_dims;
 
-                        float x0 = src[idx0];
-                        float x1 = src[idx1];
+                        float x0 = src_ptr[idx0];
+                        float x1 = src_ptr[idx1];
 
-                        dst[idx0] = x0 * cos_theta - x1 * sin_theta;
-                        dst[idx1] = x0 * sin_theta + x1 * cos_theta;
+                        dst_ptr[idx0] = x0 * cos_theta - x1 * sin_theta;
+                        dst_ptr[idx1] = x0 * sin_theta + x1 * cos_theta;
                     }
                 }
 
                 /* Copy remaining dimensions unchanged */
                 for (int64_t i0 = n_dims; i0 < ne0; i0++) {
-                    dst[i0] = src[i0];
+                    dst_ptr[i0] = src_ptr[i0];
                 }
             }
         }

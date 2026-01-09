@@ -659,43 +659,47 @@ zdnn_status zdnn_get_min_limit(zdnn_data_types transformed_type,
 // -----------------------------------------------------------------------------
 
 // RMS Normalization - key operation for LLaMA-style models
+// Computes: output = (input / rms(input)) * weight
+// where rms(x) = sqrt(mean(x^2) + epsilon)
 zdnn_status zdnn_rmsnorm(const zdnn_ztensor *input,
                          const zdnn_ztensor *weight,
                          float epsilon,
                          zdnn_ztensor *output);
 
 // Extract rows using indices - for embedding lookups
-zdnn_status zdnn_get_rows(const float *src,
-                          int64_t src_ne0,
-                          int64_t src_ne1,
-                          const int32_t *indices,
-                          int64_t num_indices,
-                          float *output);
+// input: Source tensor (2D: [vocab_size x embed_dim], pre-transformed desc)
+// indices: Row indices to extract (1D: [num_indices], type INT32)
+// output: Gathered rows ([num_indices x embed_dim])
+// Note: Tensors should have is_transformed=false (raw data mode)
+zdnn_status zdnn_get_rows(const zdnn_ztensor *input,
+                          const zdnn_ztensor *indices,
+                          zdnn_ztensor *output);
 
-// Batched row extraction for 4D tensors
-zdnn_status zdnn_get_rows_batched(const float *src,
-                                   int64_t src_ne0,
-                                   int64_t src_ne1,
-                                   int64_t src_ne2,
-                                   int64_t src_ne3,
-                                   const int32_t *indices,
-                                   int64_t idx_ne0,
-                                   int64_t idx_ne1,
-                                   int64_t idx_ne2,
-                                   float *output);
+// Batched row extraction for higher-dimensional tensors
+// input: Source tensor with batch dimensions
+// indices: Index tensor with batch dimensions
+// output: Gathered rows with batch dimensions
+// Note: Tensors should have is_transformed=false (raw data mode)
+zdnn_status zdnn_get_rows_batched(const zdnn_ztensor *input,
+                                   const zdnn_ztensor *indices,
+                                   zdnn_ztensor *output);
 
 // Rotary Position Embedding - for transformer attention
-zdnn_status zdnn_rope(const float *input,
-                      const int32_t *positions,
-                      int64_t ne0,
-                      int64_t ne1,
-                      int64_t ne2,
-                      int64_t ne3,
+// input: Input tensor [batch x seq x heads x embed_dim]
+// positions: Position indices per token (1D: [seq_len], type INT32)
+// n_dims: Number of dimensions to apply rotation to
+// mode: RoPE variant (0=standard, 2=GPT-NeoX)
+// freq_base: Base frequency (typically 10000.0)
+// freq_scale: Scaling factor for extended context
+// output: Output tensor (same shape as input)
+// Note: Tensors should have is_transformed=false (raw data mode)
+zdnn_status zdnn_rope(const zdnn_ztensor *input,
+                      const zdnn_ztensor *positions,
                       int n_dims,
                       int mode,
                       float freq_base,
                       float freq_scale,
-                      float *output);
+                      zdnn_ztensor *output);
 
 #ifdef __cplusplus
 }
