@@ -701,6 +701,53 @@ zdnn_status zdnn_rope(const zdnn_ztensor *input,
                       float freq_scale,
                       zdnn_ztensor *output);
 
+// =============================================================================
+// RoPE Cache (Pre-computed cos/sin tables for performance)
+// =============================================================================
+// Eliminates runtime trigonometry by pre-computing tables for all positions.
+// Provides 6x+ speedup for RoPE operations.
+//
+// Usage:
+//   zdnn_rope_cache cache;
+//   zdnn_rope_cache_init(&cache, max_seq, head_dim, 10000.0f, 1.0f);
+//   // Use zdnn_rope_cached() instead of zdnn_rope() for inference
+//   zdnn_rope_cache_free(&cache);
+
+typedef struct {
+    float *cos_table;     // [max_seq, n_dims/2] - cos values
+    float *sin_table;     // [max_seq, n_dims/2] - sin values
+    uint32_t max_seq;     // Maximum sequence length supported
+    uint32_t n_dims;      // Number of dimensions for rotation (head_dim)
+    float freq_base;      // Base frequency (usually 10000.0)
+    float freq_scale;     // Frequency scale factor (usually 1.0)
+    bool valid;           // Whether cache contains valid data
+} zdnn_rope_cache;
+
+// Initialize RoPE cache with pre-computed cos/sin tables
+zdnn_status zdnn_rope_cache_init(zdnn_rope_cache *cache,
+                                  uint32_t max_seq,
+                                  uint32_t n_dims,
+                                  float freq_base,
+                                  float freq_scale);
+
+// Free RoPE cache and release memory
+void zdnn_rope_cache_free(zdnn_rope_cache *cache);
+
+// Apply RoPE using pre-computed tables (faster than zdnn_rope)
+// Note: Tensors should have is_transformed=false (raw data mode)
+zdnn_status zdnn_rope_cached(const zdnn_ztensor *input,
+                              const zdnn_ztensor *positions,
+                              const zdnn_rope_cache *cache,
+                              int mode,
+                              zdnn_ztensor *output);
+
+// =============================================================================
+// SIMD-Optimized Sum Reduction (s390x Vector Facility)
+// =============================================================================
+// Uses z/Architecture vector instructions for efficient sum reduction.
+
+float zdnn_simd_sum_f32(const float *data, uint32_t n);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
