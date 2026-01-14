@@ -153,5 +153,9 @@ ZDNN_1.0 {
     zdnn_get_rows;
     zdnn_get_rows_batched;
     zdnn_rope;
+    zdnn_rope_cache_init;
+    zdnn_rope_cache_free;
+    zdnn_rope_cached;
+    zdnn_simd_sum_f32;
   local: *;
 };
